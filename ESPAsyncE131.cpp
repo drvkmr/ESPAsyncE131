@@ -18,20 +18,12 @@
 */
 
 #include "ESPAsyncE131.h"
-#include <string.h>
 
 // E1.17 ACN Packet Identifier
 const byte ESPAsyncE131::ACN_ID[12] = { 0x41, 0x53, 0x43, 0x2d, 0x45, 0x31, 0x2e, 0x31, 0x37, 0x00, 0x00, 0x00 };
 
 // Constructor
 ESPAsyncE131::ESPAsyncE131(uint8_t buffers) {
-
-    pbuff = nullptr;
-    if (buffers)
-    {
-        pbuff = RingBuf_new (sizeof (e131_packet_t), buffers);
-    }
-
     stats.num_packets = 0;
     stats.packet_errors = 0;
 }
@@ -42,21 +34,27 @@ ESPAsyncE131::ESPAsyncE131(uint8_t buffers) {
 //
 /////////////////////////////////////////////////////////
 
-bool ESPAsyncE131::begin(e131_listen_t type, uint16_t universe, uint8_t n)
-{
-    return begin (type, E131_ListenPort, universe, n);
+bool ESPAsyncE131::begin(e131_listen_t type, uint16_t universe, uint8_t n, protocol_t protocol) {
+    return begin(type, E131_ListenPort, universe, n, protocol);
 }
 
-bool ESPAsyncE131::begin (e131_listen_t type, ESPAsyncE131PortId UdpPortId, uint16_t universe, uint8_t n)
-{
+
+bool ESPAsyncE131::begin(e131_listen_t type, ESPAsyncE131PortId UdpPortId, uint16_t universe, uint8_t n, protocol_t protocol) {
     bool success = false;
 
     E131_ListenPort = UdpPortId;
 
-    if (type == E131_UNICAST)
-        success = initUnicast ();
-    if (type == E131_MULTICAST)
-        success = initMulticast (universe, n);
+    if (protocol == PROTOCOL_E131) {
+        if (type == E131_UNICAST)
+            success = initUnicast();
+        if (type == E131_MULTICAST)
+            success = initMulticast(universe, n);
+    } else if (protocol == PROTOCOL_ARTNET) {
+        if (type == E131_UNICAST)
+            success = initArtnetUnicast();
+        if (type == E131_MULTICAST)
+            success = initArtnetBroadcast();
+    }
 
     return success;
 }
@@ -106,6 +104,21 @@ bool ESPAsyncE131::initMulticast(uint16_t universe, uint8_t n) {
     return success;
 }
 
+bool ESPAsyncE131::initArtnetUnicast() {
+    bool success = false;
+    delay(100);
+
+    if (udp.listen(ARTNET_DEFAULT_PORT)) {
+        udp.onPacket(std::bind(&ESPAsyncE131::parsePacket, this, std::placeholders::_1));
+        success = true;
+    }
+    return success;
+}
+
+bool ESPAsyncE131::initArtnetBroadcast() {
+    return initArtnetUnicast();  // Art-Net broadcast uses the same port as unicast
+}
+
 /////////////////////////////////////////////////////////
 //
 // Packet parsing - Private
@@ -115,6 +128,10 @@ bool ESPAsyncE131::initMulticast(uint16_t universe, uint8_t n) {
 void ESPAsyncE131::parsePacket(AsyncUDPPacket _packet) {
     e131_error_t error = ERROR_NONE;
 
+    if (memcmp(_packet.data(), ARTNET_ID, sizeof(ARTNET_ID)) == 0) {
+      parseArtnetPacket(_packet);
+      return;
+    }
     sbuff = reinterpret_cast<e131_packet_t *>(_packet.data());
     if (memcmp(sbuff->acn_id, ESPAsyncE131::ACN_ID, sizeof(sbuff->acn_id)))
         error = ERROR_ACN_ID;
@@ -129,8 +146,8 @@ void ESPAsyncE131::parsePacket(AsyncUDPPacket _packet) {
 
 
     if (!error) {
-        if (PacketCallback) { (*PacketCallback) (sbuff, UserInfo); }
-        if (pbuff) { pbuff->add (pbuff, sbuff); }
+        dataReceived = true;
+    if (PacketCallback) { PacketCallback(sbuff, PROTOCOL_E131, UserInfo); }
 
         stats.num_packets++;
         stats.last_clientIP = _packet.remoteIP();
@@ -144,6 +161,33 @@ void ESPAsyncE131::parsePacket(AsyncUDPPacket _packet) {
         stats.packet_errors++;
     }
 }
+
+void ESPAsyncE131::parseArtnetPacket(AsyncUDPPacket _packet) {
+    // Check the opcode to determine the type of Art-Net packet
+    uint16_t opcode = (_packet.data()[9] << 8) | _packet.data()[8];
+
+    switch (opcode) {
+        case 0x5000:  // ArtDMX
+            // Handle ArtDMX packet
+            // For now, we'll just set dataReceived to true
+            dataReceived = true;
+            if (PacketCallback) { PacketCallback(_packet.data(), PROTOCOL_ARTNET, UserInfo); }
+            break;
+
+        case 0x2000:  // ArtPoll
+            // Handle ArtPoll packet
+            // For now, we'll just print that we received an ArtPoll
+            Serial.println("Received ArtPoll");
+            break;
+
+        default:
+            // Handle unknown opcodes or add more cases for other opcodes
+            Serial.print("Unknown Art-Net opcode: 0x");
+            Serial.println(opcode, HEX);
+            break;
+    }
+}
+
 
 /////////////////////////////////////////////////////////
 //
@@ -173,6 +217,13 @@ void ESPAsyncE131::dumpError(e131_error_t error) {
         case ERROR_VECTOR_DMP:
             Serial.print(F("INVALID DMP VECTOR: 0x"));
             Serial.println(sbuff->dmp_vector, HEX);
+            break;
+        case ERROR_ARTNET_ID:
+            Serial.println(F("INVALID ART-NET ID"));
+            break;
+        case ERROR_ARTNET_OPCODE:
+            Serial.println(F("INVALID ART-NET OPCODE"));
+            break;
         case ERROR_NONE:
             break;
         case ERROR_IGNORE:

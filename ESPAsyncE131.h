@@ -23,10 +23,6 @@
 #ifdef ESP32
 #include <WiFi.h>
 #include <AsyncUDP.h>
-#elif defined (ESP8266)
-#include <ESPAsyncUDP.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
 #else
 #error Platform not supported
 #endif
@@ -34,7 +30,7 @@
 #include <lwip/ip_addr.h>
 #include <lwip/igmp.h>
 #include <Arduino.h>
-#include "RingBuf.h"
+#include <functional>
 
 #if LWIP_VERSION_MAJOR == 1
 typedef struct ip_addr ip4_addr_t;
@@ -42,6 +38,10 @@ typedef struct ip_addr ip4_addr_t;
 
 // Defaults
 #define E131_DEFAULT_PORT 5568
+#define ARTNET_DEFAULT_PORT 6454
+
+static const uint8_t ARTNET_ID[8] = {'A', 'r', 't', '-', 'N', 'e', 't', '\0'};
+static const uint8_t ACN_ID[12] = { 0x41, 0x53, 0x43, 0x2d, 0x45, 0x31, 0x2e, 0x31, 0x37, 0x00, 0x00, 0x00 };
 
 // E1.31 Packet Offsets
 #define E131_ROOT_PREAMBLE_SIZE 0
@@ -102,6 +102,29 @@ typedef union {
     uint8_t raw[638];
 } e131_packet_t;
 
+//Artnet Packet structure
+typedef struct {
+    uint8_t  id[8];
+    uint16_t opcode;
+    uint8_t  protVerHi;
+    uint8_t  protVerLo;
+    uint8_t  sequence;
+    uint8_t  physical;
+    uint16_t universe;
+    uint16_t length;
+    uint8_t  dmx[512];
+} __attribute__((packed)) artnet_dmx_packet_t;
+
+typedef struct {
+    uint8_t  id[8];
+    uint16_t opcode;
+    uint8_t  protVerHi;
+    uint8_t  protVerLo;
+    uint8_t  talkToMe;
+    uint8_t  priority;
+} __attribute__((packed)) artnet_poll_packet_t;
+
+
 // Error Types
 typedef enum {
     ERROR_NONE,
@@ -110,7 +133,9 @@ typedef enum {
     ERROR_PACKET_SIZE,
     ERROR_VECTOR_ROOT,
     ERROR_VECTOR_FRAME,
-    ERROR_VECTOR_DMP
+    ERROR_VECTOR_DMP,
+    ERROR_ARTNET_ID,
+    ERROR_ARTNET_OPCODE
 } e131_error_t;
 
 // E1.31 Listener Types
@@ -128,45 +153,58 @@ typedef struct {
     unsigned long    last_seen;
 } e131_stats_t;
 
+typedef enum {
+    PROTOCOL_E131,
+    PROTOCOL_ARTNET
+} protocol_t;
+
 typedef uint16_t ESPAsyncE131PortId;
 
 class ESPAsyncE131 {
  private:
+    
+    protocol_t currentProtocol = PROTOCOL_E131;
+    
     // Constants for packet validation
     static const uint8_t ACN_ID[];
     static const uint32_t VECTOR_ROOT = 4;
     static const uint32_t VECTOR_FRAME = 2;
     static const uint8_t VECTOR_DMP = 2;
 
-    e131_packet_t   *sbuff;     // Pointer to scratch packet buffer
     AsyncUDP        udp;        // AsyncUDP
-    RingBuf         *pbuff;     // Ring Buffer of universe packet buffers
     void            * UserInfo = nullptr;
 
     // Internal Initializers
     bool initUnicast();
     bool initMulticast(uint16_t universe, uint8_t n = 1);
 
+    bool initArtnetUnicast();
+    bool initArtnetBroadcast();
+
+    bool dataReceived = false;
+
     // Packet parser callback
     void parsePacket(AsyncUDPPacket _packet);
+    void parseArtnetPacket(AsyncUDPPacket _packet);
 
-    void (*PacketCallback)(e131_packet_t* ReceivedData, void* UserInfo) = nullptr;
+    std::function<void(void*, protocol_t, void*)> PacketCallback;
     ESPAsyncE131PortId E131_ListenPort = E131_DEFAULT_PORT;
 
  public:
     e131_stats_t  stats;    // Statistics tracker
     ESPAsyncE131(uint8_t buffers = 1);
+    e131_packet_t   *sbuff;     // Pointer to scratch packet buffer
 
     // Generic UDP listener, no physical or IP configuration
-    bool begin (e131_listen_t type, uint16_t universe = 1, uint8_t n = 1);
-    bool begin (e131_listen_t type, ESPAsyncE131PortId UdpPortId, uint16_t universe, uint8_t n);
-
-    // Ring buffer access
-    inline bool isEmpty() { return pbuff->isEmpty(pbuff); }
-    inline void *pull(e131_packet_t *packet) { return pbuff->pull(pbuff, packet); }
+    bool begin(e131_listen_t type, uint16_t universe = 1, uint8_t n = 1, protocol_t protocol = PROTOCOL_E131);
+    bool begin(e131_listen_t type, ESPAsyncE131PortId UdpPortId, uint16_t universe, uint8_t n, protocol_t protocol = PROTOCOL_E131);
+    bool isNewDataReceived() { return dataReceived; }
+    void clearDataReceivedFlag() { dataReceived = false; }
 
     // Callback support
-    void registerCallback(void* _UserInfo, void (*cbFunction)(e131_packet_t*, void*)) { PacketCallback = cbFunction; UserInfo = _UserInfo; }
+      void registerCallback(const std::function<void(void*, protocol_t, void*)>& callback) { 
+          PacketCallback = callback; 
+      }
 
     // Diag functions
     void dumpError(e131_error_t error);
