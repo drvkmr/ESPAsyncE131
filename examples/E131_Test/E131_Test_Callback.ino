@@ -29,6 +29,18 @@ const char passphrase[] = "........";   // Replace with your WPA2 passphrase
 // ESPAsyncE131 instance with UNIVERSE_COUNT buffer slots
 ESPAsyncE131 e131(UNIVERSE_COUNT);
 
+void onNewPacketReceived(void* packet, protocol_t protocol, void* userInfo) {
+    if (protocol == PROTOCOL_E131) {
+        e131_packet_t* e131Packet = reinterpret_cast<e131_packet_t*>(packet);
+        Serial.printf("Universe %u / %u Channels | Packet#: %u / Errors: %u / CH1: %u\n",
+            htons(e131Packet->universe),                 // The Universe for this packet
+            htons(e131Packet->property_value_count) - 1, // Start code is ignored, we're interested in dimmer data
+            e131.stats.num_packets,                 // Packet counter
+            e131.stats.packet_errors,               // Packet error counter
+            e131Packet->property_values[1]);             // Dimmer data for Channel 1
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     delay(10);
@@ -60,17 +72,11 @@ void setup() {
         Serial.println(F("Listening for data..."));
     else 
         Serial.println(F("*** e131.begin failed ***"));
+
+    e131.registerCallback([this](void* packet, protocol_t protocol, void* userInfo) {
+        this->onNewPacketReceived(packet, protocol, userInfo);
+    });
 }
 
 void loop() {
-    if (!e131.isEmpty()) {
-        e131_packet_t *packet = _e131.sbuff;
-        
-        Serial.printf("Universe %u / %u Channels | Packet#: %u / Errors: %u / CH1: %u\n",
-                htons(packet->universe),                 // The Universe for this packet
-                htons(packet->property_value_count) - 1, // Start code is ignored, we're interested in dimmer data
-                e131.stats.num_packets,                 // Packet counter
-                e131.stats.packet_errors,               // Packet error counter
-                packet->property_values[1]);             // Dimmer data for Channel 1
-    }
 }
